@@ -43,26 +43,23 @@ Blog: https://velog.io/@hediar
 ### 📌 경량 로그 수집 & 모니터링 시스템
 
 #### 문제 상황
-- 원격 서버 로그를 주기적으로 수집해야 함
-- 기존 방식: cron + scp + OpenSearch
-
-#### 문제점
-- 환경별 의존성 이슈
-- 전송 방식 혼재
-- 중복 로그 유입 가능성
+- 여러 서버를 운영하다 보니 로그 확인이 잦음
+- 매번 서버에 접속해 파일을 열어봐야 했고, 로그에 익숙하지 않은 사람에게는 부담이 큼
+- 결국 일부 인원만 로그를 확인하는 구조
+- 누구나 접근 가능한 경량 로그 모니터링 도구가 필요함
 
 #### AI 활용 방법 (How)
 
 1. **요구사항을 텍스트로 명확히 정의**
    - 로그 양은 많지 않음
-   - 운영 환경 안정성이 최우선
+   - 운영 환경 안정성이 최우선(테스트 서버에서 먼저 확인)
    - 배포/파일 이동 시 단일 전송 방식 선호
    - 중복 데이터 유입 방지 필요
 
 2. **AI에게 “설계 초안” 요청**
-   - 기존 구조(cron + scp)를 설명
+   - 기존 구조(cron + scp + Opensearch)를 설명
    - 대체 가능한 방식 제안 요청
-   - 👉 AI가 SFTP 단일 방식을 제안
+   - AI가 SFTP 단일 방식을 제안
 
 3. **AI 제안 검증 & 채택**
    - scp / rsync 대비
@@ -87,8 +84,8 @@ Blog: https://velog.io/@hediar
 
 | 항목 | 개선 전 | 개선 후 |
 |------|---------|---------|
-| 로그 전송 방식 | scp / rsync 혼용 | SFTP 단일 |
-| 운영 안정성 | 환경 의존적 | 환경 독립 |
+| 로그 전송 방식 | scp / rsync 실패 시 수동 처리 | scp / rsync 실패 시 SFTP fallback |
+| 수집 방식 | cron 단독 | cron + ingest job 분리 |
 | 중복 데이터 | 수동 관리 | Hash 기반 차단 |
 
 #### 기여도
@@ -131,7 +128,6 @@ Blog: https://velog.io/@hediar
 - 구현: AI 초안 80% -> Human 리팩토링 20% 
 - 검증: 100%
 
----
 
 ## 2. AI로 생성한 초안 vs 최종 산출물
 
@@ -144,27 +140,30 @@ Blog: https://velog.io/@hediar
 
 #### 사전 정리한 요구사항 (축약된 내용 예시)
 
-**공통**
+```
+공통
 - id (PK)
 - 생성일, 수정일 (Nullable)
 
-**User**
+User
 - 이메일, 비밀번호, 이름, 전화번호
 - 역할, 차번호, 프로필 이미지
 - 활성화 여부, 이메일 인증 여부
 
-**알림**
+알림
 - 사용자 ID(FK)
 - 알림 종류, 메시지, 상태, 발송 시간
 
-**예약**
+예약
 - 시작/종료 시간
 - 차량 번호
 - 예약 상태
 
-**결제**
+결제
 - 결제 수단, 상태, PG 트랜잭션
 - 결제 금액, 실패 사유
+```
+
 
 #### AI 활용 방법
 
@@ -173,6 +172,7 @@ Blog: https://velog.io/@hediar
    - dbdiagram.io 문법 사용
    - 테이블 간 관계 명확히
    - 공통 컬럼 재사용
+   - 로그 수집 DB 고려
 
 2. **AI가 생성한 ERD 초안**
    - 전체 테이블 구조 자동 생성
@@ -182,18 +182,121 @@ Blog: https://velog.io/@hediar
 - 일부 관계 누락
 - 예약/결제 흐름이 실제 비즈니스와 불일치
 - Nullable 정책 미흡
+- 요구하지 않은 범위까지 포함하는 과설계 발생
 
 #### 최종 수정 (Human)
 - 관계 재정의
-- 정책 컬럼 및 추가기능에 따른 테이블 추가
+- 정책 컬럼 및 추가 기능에 따른 테이블 추가
 - 실제 API 흐름 기준으로 테이블 분리
+- 설계 최적화
+
+#### 최종 결과물 (DBML 축약)
+
+```dbml
+// BDZ_ERD (DBML, shortened)
+Table users {
+  id bigint [pk, increment]
+  email varchar(255) [not null, unique]
+  password varchar(255) [not null]
+  name varchar(100)
+  phone varchar(30)
+  role varchar(50)
+  is_active boolean [default: true]
+  is_email_verified boolean [default: false]
+  created_at timestamp
+  updated_at timestamp
+}
+
+
+Table notifications {
+  id bigint [pk, increment]
+  receiver_user_id bigint [not null, ref: > users.id]
+  type varchar(50)
+  status varchar(20)
+  sent_at timestamp
+  target_type varchar(50)
+  target_id bigint
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table reservations {
+  id bigint [pk, increment]
+  user_id bigint [not null, ref: > users.id]
+  parking_lot_id varchar(20) [not null, ref: > parking_lot.id]
+  car_id bigint [ref: > cars.id]
+  start_time timestamp [not null]
+  end_time timestamp [not null]
+  status varchar(30)
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table payments {
+  id bigint [pk, increment]
+  user_id bigint [not null, ref: > users.id]
+  reservation_id bigint [not null, ref: > reservations.id]
+  amount int [not null]
+  status varchar(30)
+  pg_transaction_id varchar(200)
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table payment_events {
+  id bigint [pk, increment]
+  payment_id bigint [not null, ref: > payments.id]
+  event_type varchar(50)
+  occurred_at timestamp [not null]
+  created_at timestamp
+  updated_at timestamp
+}
+
+
+Table parking_fee_policy {
+  parking_lot_id varchar(20) [pk, ref: > parking_lot.id]
+  date_type char(3) [not null]
+  base_fee int [not null]
+  add_fee int [not null]
+  created_at timestamp
+  updated_at timestamp
+}
+
+
+Table recommendation_results {
+  id bigint [pk, increment]
+  request_id bigint [not null, ref: > recommendation_requests.id]
+  parking_lot_id varchar(20) [not null, ref: > parking_lot.id]
+  rank int [not null]
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table recommendation_events {
+  id bigint [pk, increment]
+  user_id bigint [not null, ref: > users.id]
+  result_id bigint [not null, ref: > recommendation_results.id]
+  event_type varchar(30) [not null]
+  reservation_id bigint [ref: > reservations.id]
+  occurred_at timestamp [not null]
+  created_at timestamp
+  updated_at timestamp
+}
+
+Table conversations {
+  conversation_id varchar(64) [pk]
+  user_id bigint [not null, ref: > users.id]
+  created_at timestamp
+  ended_at timestamp
+}
+
+```
 
 #### 기여도
 - 요구사항 정의: 100%
 - ERD 구조 설계: Human 80% + AI 20%
 - 최종 검증 및 수정: 100%
 
----
 
 ## 3. AI의 한계를 겪고 해결한 경험
 
@@ -220,8 +323,8 @@ Blog: https://velog.io/@hediar
 - 실제 런타임 의존성 고려 부족
 
 #### 해결 과정
-- 실제 서비스 구조 연결 초안 제공
-- OpenSearch 쿼리는 공식 문서 기준으로 재작성
+- 실제 서비스 구조 연결 초안 작성
+- OpenSearch 쿼리는 공식 문서와 기존 결과와 동일하도록 재작성
 - 핵심 기능 조회 API는 AI 활용
 
 #### 결과
@@ -229,41 +332,12 @@ Blog: https://velog.io/@hediar
 - 가장 중요한 장치 데이터 조회 기능 안정화
 
 #### 기여도
-- 마이그레이션 전략: 100%
 - AI 활용: 구조 초안 & 코드 참고
 - 최종 구현 및 안정화: 100%
 
----
-
-## 4. 실제 사용한 프롬프트 템플릿
-
-### 구조화된 프롬프트 예시
-
-```
-
-[목표]
-- OpenSearch + Redis(TS) 기반 조회 API
-
-[제약]
-- 기존 프로젝트 구조 유지
-- TypeScript, Opensearch, Redis(TS)
-- 기능별 폴더 분리
-- `viewtrack api 기능 파일 경로` 참고
-
-[출력]
-- Controller / Service 파일 분리
-
-```
-
-#### 효과
-- 불필요한 재작업 감소
-- AI 결과물 수정 비용 최소화
-
----
 
 ## 마무리
 
-- AI는 설계 보조
+- AI는 설계 보조 및 구현
 - 최종 책임은 사람
-- 검증 가능한 구조와 로그, 커밋이 가장 중요
-
+- 검증 가능한 구조와 로그, git 형상관리 중요
